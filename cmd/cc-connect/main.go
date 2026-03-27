@@ -219,6 +219,9 @@ func main() {
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
+			if len(proj.ChannelBindings) > 0 {
+				engine.SeedChannelBindings(proj.ChannelBindings)
+			}
 		}
 
 		// Wire global custom commands

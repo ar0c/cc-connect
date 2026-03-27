@@ -186,8 +186,9 @@ type ProjectConfig struct {
 	Quiet                *bool        `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
 	InjectSender         *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
 	DisabledCommands     []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom            string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users                *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	AdminFrom            string            `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users                *UsersConfig      `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	ChannelBindings      map[string]string `toml:"channel_bindings,omitempty"`  // channel_id → workspace path; seeds workspace bindings at startup (multi-workspace only)
 }
 
 type AgentConfig struct {
@@ -302,6 +303,16 @@ func (c *Config) validate() error {
 			}
 			if _, ok := proj.Agent.Options["work_dir"]; ok {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
+			}
+		}
+		if len(proj.ChannelBindings) > 0 {
+			if proj.Mode != "multi-workspace" {
+				return fmt.Errorf("project %q: channel_bindings requires mode = \"multi-workspace\"", proj.Name)
+			}
+			for chID, ws := range proj.ChannelBindings {
+				if ws == "" {
+					return fmt.Errorf("project %q: channel_bindings[%q] has empty workspace", proj.Name, chID)
+				}
 			}
 		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {

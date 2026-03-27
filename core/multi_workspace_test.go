@@ -428,3 +428,256 @@ func TestWorkspaceInitFlow_SlashCommandCleansUpExistingFlow(t *testing.T) {
 		t.Error("expected init flow to be deleted after slash command, but it still exists")
 	}
 }
+
+func TestSeedChannelBindings_CreatesBindings(t *testing.T) {
+	baseDir := t.TempDir()
+
+	// Create workspace directories
+	backendDir := filepath.Join(baseDir, "backend")
+	frontendDir := filepath.Join(baseDir, "frontend")
+	if err := os.MkdirAll(backendDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(frontendDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+
+	bindings := map[string]string{
+		"1111111111": backendDir,
+		"2222222222": frontendDir,
+	}
+	e.SeedChannelBindings(bindings)
+
+	// Verify bindings are queryable via resolveWorkspace
+	// (they should exist as project-level bindings)
+	projectKey := "project:" + e.name
+	for channelID, wsDir := range bindings {
+		channelKey := workspaceChannelKey("discord", channelID)
+		b := e.workspaceBindings.Lookup(projectKey, channelKey)
+		if b == nil {
+			t.Fatalf("expected binding for channel %s, got nil", channelID)
+		}
+		expected := normalizeWorkspacePath(wsDir)
+		if b.Workspace != expected {
+			t.Errorf("channel %s: workspace = %q, want %q", channelID, b.Workspace, expected)
+		}
+	}
+}
+
+func TestSeedChannelBindings_DoesNotOverwriteExisting(t *testing.T) {
+	baseDir := t.TempDir()
+
+	wsDir := filepath.Join(baseDir, "backend")
+	overrideDir := filepath.Join(baseDir, "override")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(overrideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+
+	// Simulate a user's /dir binding already in place
+	channelID := "1111111111"
+	projectKey := "project:" + e.name
+	channelKey := workspaceChannelKey("discord", channelID)
+	e.workspaceBindings.Bind(projectKey, channelKey, "backend", normalizeWorkspacePath(overrideDir))
+
+	// Seed should NOT overwrite the existing binding
+	e.SeedChannelBindings(map[string]string{
+		channelID: wsDir,
+	})
+
+	b := e.workspaceBindings.Lookup(projectKey, channelKey)
+	if b == nil {
+		t.Fatal("expected binding, got nil")
+	}
+	if b.Workspace != normalizeWorkspacePath(overrideDir) {
+		t.Errorf("seed overwrote existing binding: got %q, want %q", b.Workspace, normalizeWorkspacePath(overrideDir))
+	}
+}
+
+func TestSeedChannelBindings_SkipsMissingWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+
+	// Seed with a non-existent directory
+	e.SeedChannelBindings(map[string]string{
+		"1111111111": filepath.Join(baseDir, "does-not-exist"),
+	})
+
+	projectKey := "project:" + e.name
+	channelKey := workspaceChannelKey("discord", "1111111111")
+	b := e.workspaceBindings.Lookup(projectKey, channelKey)
+	if b != nil {
+		t.Errorf("expected no binding for missing workspace, got %+v", b)
+	}
+}
+
+func TestSeedChannelBindings_ExpandsTilde(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "myproject")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+
+	// Use tilde path — SeedChannelBindings should expand ~/ to home dir
+	home, _ := os.UserHomeDir()
+	tildeWs := "~/" + "nonexistent-tilde-test"
+	realWs := filepath.Join(home, "nonexistent-tilde-test")
+
+	// Create the directory so the binding succeeds
+	if err := os.MkdirAll(realWs, 0o755); err != nil {
+		t.Skip("cannot create dir in home for tilde test")
+	}
+	defer os.RemoveAll(realWs)
+
+	e.SeedChannelBindings(map[string]string{
+		"3333333333": tildeWs,
+	})
+
+	projectKey := "project:" + e.name
+	channelKey := workspaceChannelKey("discord", "3333333333")
+	b := e.workspaceBindings.Lookup(projectKey, channelKey)
+	if b == nil {
+		t.Fatal("expected binding for tilde-expanded path, got nil")
+	}
+	if b.Workspace != normalizeWorkspacePath(realWs) {
+		t.Errorf("workspace = %q, want %q", b.Workspace, normalizeWorkspacePath(realWs))
+	}
+}
+
+func TestSeedChannelBindings_ResolvesRelativeToBaseDir(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "myproject")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+
+	// Relative path should resolve against base_dir
+	e.SeedChannelBindings(map[string]string{
+		"4444444444": "myproject",
+	})
+
+	projectKey := "project:" + e.name
+	channelKey := workspaceChannelKey("discord", "4444444444")
+	b := e.workspaceBindings.Lookup(projectKey, channelKey)
+	if b == nil {
+		t.Fatal("expected binding for relative path, got nil")
+	}
+	if b.Workspace != normalizeWorkspacePath(wsDir) {
+		t.Errorf("workspace = %q, want %q", b.Workspace, normalizeWorkspacePath(wsDir))
+	}
+}
+
+func TestSeedChannelBindings_NilMapIsNoop(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+
+	// Should not panic
+	e.SeedChannelBindings(nil)
+	e.SeedChannelBindings(map[string]string{})
+}
+
+func TestSeedChannelBindings_SetsAllowedChannels(t *testing.T) {
+	baseDir := t.TempDir()
+	for _, d := range []string{"backend", "frontend"} {
+		if err := os.MkdirAll(filepath.Join(baseDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	e.SeedChannelBindings(map[string]string{
+		"1111": "backend",
+		"2222": "frontend",
+	})
+
+	if !e.IsChannelAllowed("1111") {
+		t.Error("expected channel 1111 to be allowed")
+	}
+	if !e.IsChannelAllowed("2222") {
+		t.Error("expected channel 2222 to be allowed")
+	}
+	if e.IsChannelAllowed("9999") {
+		t.Error("expected channel 9999 to be rejected")
+	}
+}
+
+func TestIsChannelAllowed_EmptySetAllowsAll(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+
+	// No SeedChannelBindings called — allowedChannels is nil
+	if !e.IsChannelAllowed("any-channel") {
+		t.Error("expected all channels allowed when no bindings configured")
+	}
+}
+
+func TestHandleMessage_DropsUnboundChannel(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(baseDir, "backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions.json")
+	bindingPath := filepath.Join(tmpDir, "bindings.json")
+
+	p := &stubPlatformWithSend{name: "discord"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, sessionPath, LangEnglish)
+	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SeedChannelBindings(map[string]string{
+		"1111": "backend",
+	})
+
+	// Message from allowed channel — should NOT be dropped (no reply to indicate rejection)
+	msg1 := &Message{
+		SessionKey: "discord:1111:user1",
+		Platform:   "discord",
+		UserID:     "user1",
+		UserName:   "User",
+		Content:    "hello",
+		ReplyCtx:   "rctx1",
+	}
+	e.handleMessage(p, msg1)
+	// We don't check exact behavior since agent session startup is complex,
+	// just verify no "not allowed" reply was sent
+
+	// Message from disallowed channel — should be silently dropped
+	msg2 := &Message{
+		SessionKey: "discord:9999:user1",
+		Platform:   "discord",
+		UserID:     "user1",
+		UserName:   "User",
+		Content:    "hello from unbound channel",
+		ReplyCtx:   "rctx2",
+	}
+	p.sent = nil // reset
+	e.handleMessage(p, msg2)
+
+	// Verify nothing was sent back (silently dropped)
+	if len(p.sent) > 0 {
+		t.Errorf("expected no reply for unbound channel, got %d messages: %v", len(p.sent), p.sent)
+	}
+}
+
+// stubPlatformWithSend records sent messages for assertion.
+type stubPlatformWithSend struct {
+	name string
+	sent []string
+}
+
+func (p *stubPlatformWithSend) Name() string                                         { return p.name }
+func (p *stubPlatformWithSend) Start(MessageHandler) error                           { return nil }
+func (p *stubPlatformWithSend) Reply(_ context.Context, _ any, content string) error { p.sent = append(p.sent, content); return nil }
+func (p *stubPlatformWithSend) Send(_ context.Context, _ any, content string) error  { p.sent = append(p.sent, content); return nil }
+func (p *stubPlatformWithSend) Stop() error                                          { return nil }

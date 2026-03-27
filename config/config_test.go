@@ -97,6 +97,56 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: `project "demo": multi-workspace mode conflicts with agent work_dir`,
 		},
 		{
+			name: "channel_bindings requires multi-workspace mode",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.ChannelBindings = map[string]string{
+							"123456": "~/projects/backend",
+						}
+						return p
+					}(),
+				},
+			},
+			wantErr: `project "demo": channel_bindings requires mode = "multi-workspace"`,
+		},
+		{
+			name: "channel_bindings rejects empty workspace",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.Mode = "multi-workspace"
+						p.BaseDir = "~/workspace"
+						p.Agent.Options = map[string]any{}
+						p.ChannelBindings = map[string]string{
+							"123456": "",
+						}
+						return p
+					}(),
+				},
+			},
+			wantErr: `project "demo": channel_bindings["123456"] has empty workspace`,
+		},
+		{
+			name: "channel_bindings valid in multi-workspace mode",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.Mode = "multi-workspace"
+						p.BaseDir = "~/workspace"
+						p.Agent.Options = map[string]any{}
+						p.ChannelBindings = map[string]string{
+							"123456": "~/projects/backend",
+						}
+						return p
+					}(),
+				},
+			},
+		},
+		{
 			name: "accepts valid config",
 			cfg: Config{
 				Projects: []ProjectConfig{validProject("demo")},
@@ -1274,5 +1324,60 @@ func TestSaveWeixinPlatformCredentials_UpdateToken(t *testing.T) {
 	bu, _ := cfg.Projects[0].Platforms[0].Options["base_url"].(string)
 	if bu != "https://ilinkai.weixin.qq.com" {
 		t.Fatalf("base_url = %q", bu)
+	}
+}
+
+// --- channel_bindings TOML parsing tests ---
+
+const channelBindingsConfigFixture = `
+[[projects]]
+name = "dev-hub"
+mode = "multi-workspace"
+base_dir = "/tmp/workspace"
+
+[projects.channel_bindings]
+"1111111111" = "/tmp/workspace/backend"
+"2222222222" = "/tmp/workspace/frontend"
+
+[projects.agent]
+type = "claudecode"
+
+[[projects.platforms]]
+type = "discord"
+
+[projects.platforms.options]
+token = "test-token"
+`
+
+func TestLoad_ParsesChannelBindings(t *testing.T) {
+	configPath := writeConfigFixture(t, channelBindingsConfigFixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Projects) == 0 {
+		t.Fatal("expected at least one project")
+	}
+	proj := cfg.Projects[0]
+	if len(proj.ChannelBindings) != 2 {
+		t.Fatalf("expected 2 channel bindings, got %d", len(proj.ChannelBindings))
+	}
+	if proj.ChannelBindings["1111111111"] != "/tmp/workspace/backend" {
+		t.Errorf("binding[1111111111] = %q, want /tmp/workspace/backend", proj.ChannelBindings["1111111111"])
+	}
+	if proj.ChannelBindings["2222222222"] != "/tmp/workspace/frontend" {
+		t.Errorf("binding[2222222222] = %q, want /tmp/workspace/frontend", proj.ChannelBindings["2222222222"])
+	}
+}
+
+func TestLoad_ChannelBindingsEmptyIsNil(t *testing.T) {
+	cfg := Config{
+		Projects: []ProjectConfig{validProject("demo")},
+	}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Projects[0].ChannelBindings != nil {
+		t.Errorf("expected nil ChannelBindings for project without bindings, got %v", cfg.Projects[0].ChannelBindings)
 	}
 }

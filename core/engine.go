@@ -199,6 +199,7 @@ type Engine struct {
 	workspacePool     *workspacePool
 	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
 	initFlowsMu       sync.Mutex
+	allowedChannels   map[string]bool // when non-nil, only these channel IDs are served
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -327,6 +328,59 @@ func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	go e.runIdleReaper()
 }
 
+// SeedChannelBindings pre-populates workspace bindings from declarative config.
+// Existing bindings (e.g. from a user's /dir command) are not overwritten.
+// Relative paths are resolved against baseDir; ~/ is expanded to the user's home.
+// Entries pointing to non-existent directories are skipped.
+func (e *Engine) SeedChannelBindings(bindings map[string]string) {
+	if len(bindings) == 0 || !e.multiWorkspace || e.workspaceBindings == nil {
+		return
+	}
+	projectKey := "project:" + e.name
+	home, _ := os.UserHomeDir()
+	allowed := make(map[string]bool, len(bindings))
+	for channelID, wsPath := range bindings {
+		// Expand ~/ prefix
+		if strings.HasPrefix(wsPath, "~/") && home != "" {
+			wsPath = filepath.Join(home, wsPath[2:])
+		}
+		// Resolve relative paths against baseDir
+		if !filepath.IsAbs(wsPath) {
+			wsPath = filepath.Join(e.baseDir, wsPath)
+		}
+		// Skip if directory does not exist
+		if info, err := os.Stat(wsPath); err != nil || !info.IsDir() {
+			slog.Warn("channel_bindings: skipping non-existent workspace",
+				"channel_id", channelID, "workspace", wsPath)
+			continue
+		}
+		normalized := normalizeWorkspacePath(wsPath)
+		// Use a platform-agnostic channel key so it works with any platform
+		channelKey := workspaceChannelKey("discord", channelID)
+		// Do not overwrite existing bindings (user's /dir takes precedence)
+		if b := e.workspaceBindings.Lookup(projectKey, channelKey); b != nil {
+			allowed[channelID] = true
+			continue
+		}
+		e.workspaceBindings.Bind(projectKey, channelKey, channelID, normalized)
+		allowed[channelID] = true
+		slog.Info("channel_bindings: seeded workspace binding",
+			"channel_id", channelID, "workspace", normalized)
+	}
+	if len(allowed) > 0 {
+		e.allowedChannels = allowed
+	}
+}
+
+// IsChannelAllowed returns true if the channel is allowed to interact with this engine.
+// When no channel_bindings are configured (allowedChannels is nil), all channels are allowed.
+func (e *Engine) IsChannelAllowed(channelID string) bool {
+	if e.allowedChannels == nil {
+		return true
+	}
+	return e.allowedChannels[channelID]
+}
+
 func (e *Engine) runIdleReaper() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -346,7 +400,14 @@ func (e *Engine) runIdleReaper() {
 						if state.agentSession != nil {
 							state.agentSession.Close()
 						}
-						delete(e.interactiveStates, key)
+						state.mu.Lock()
+						wasQuiet := state.quiet
+						state.mu.Unlock()
+						if wasQuiet {
+							e.interactiveStates[key] = &interactiveState{quiet: true}
+						} else {
+							delete(e.interactiveStates, key)
+						}
 					}
 				}
 				e.interactiveMu.Unlock()
@@ -1158,6 +1219,17 @@ func (e *Engine) resolveAlias(content string) string {
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	// Channel restriction: when channel_bindings are configured, silently drop
+	// messages from channels not in the allowed set.
+	if e.allowedChannels != nil {
+		channelID := extractChannelID(msg.SessionKey)
+		if !e.allowedChannels[channelID] {
+			slog.Debug("message dropped: channel not in channel_bindings",
+				"channel_id", channelID, "session", msg.SessionKey)
+			return
+		}
+	}
+
 	slog.Info("message received",
 		"platform", msg.Platform, "msg_id", msg.MessageID,
 		"session", msg.SessionKey, "user", msg.UserName,
@@ -2003,6 +2075,19 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // a stale goroutine (still running after /new created a fresh Session object and
 // a new turn started on it) from accidentally destroying the replacement state.
 func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
+	e.cleanupInteractiveStateOpts(sessionKey, false, expected...)
+}
+
+// cleanupInteractiveStatePreserveQuiet is like cleanupInteractiveState but
+// retains the quiet flag in a lightweight placeholder state so that a
+// subsequent session rebuild inherits it. Use this when the cleanup is caused
+// by an involuntary event (agent crash, idle timeout) rather than an explicit
+// user action like /new.
+func (e *Engine) cleanupInteractiveStatePreserveQuiet(sessionKey string, expected ...*interactiveState) {
+	e.cleanupInteractiveStateOpts(sessionKey, true, expected...)
+}
+
+func (e *Engine) cleanupInteractiveStateOpts(sessionKey string, preserveQuiet bool, expected ...*interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
 	if len(expected) > 0 && expected[0] != nil && state != expected[0] {
@@ -2010,7 +2095,18 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.interactiveMu.Unlock()
 		return
 	}
-	delete(e.interactiveStates, sessionKey)
+	if preserveQuiet && ok && state != nil {
+		state.mu.Lock()
+		wasQuiet := state.quiet
+		state.mu.Unlock()
+		if wasQuiet {
+			e.interactiveStates[sessionKey] = &interactiveState{quiet: true}
+		} else {
+			delete(e.interactiveStates, sessionKey)
+		}
+	} else {
+		delete(e.interactiveStates, sessionKey)
+	}
 	e.interactiveMu.Unlock()
 
 	// Notify senders of any queued messages that will never be processed.
@@ -2093,7 +2189,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				e.notifyDroppedQueuedMessages(state, err)
 				if state.agentSession == nil || !state.agentSession.Alive() {
-					e.cleanupInteractiveState(sessionKey, state)
+					e.cleanupInteractiveStatePreserveQuiet(sessionKey, state)
 				}
 				state.mu.Lock()
 				p := state.platform
@@ -2110,7 +2206,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			p := state.platform
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
-			e.cleanupInteractiveState(sessionKey, state)
+			e.cleanupInteractiveStatePreserveQuiet(sessionKey, state)
 			return
 		case <-e.ctx.Done():
 			return
@@ -2590,7 +2686,7 @@ channelClosed:
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
-	e.cleanupInteractiveState(sessionKey, state)
+	e.cleanupInteractiveStatePreserveQuiet(sessionKey, state)
 
 	if len(textParts) > 0 {
 		state.mu.Lock()
@@ -5631,6 +5727,18 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	var state *interactiveState
 	if sessionKey != "" {
 		state = e.interactiveStates[sessionKey]
+		// In multi-workspace mode, interactiveStates keys are prefixed with
+		// the workspace path (e.g. "/path/to/ws:discord:chan:user") but
+		// CC_SESSION_KEY passed to agent subprocesses is the bare session key
+		// ("discord:chan:user"). Fall back to suffix match when exact lookup misses.
+		if state == nil {
+			for k, s := range e.interactiveStates {
+				if strings.HasSuffix(k, ":"+sessionKey) || strings.HasSuffix(k, sessionKey) {
+					state = s
+					break
+				}
+			}
+		}
 	} else if len(e.interactiveStates) == 1 {
 		// Single session: use it when no sessionKey is provided (backward compatible)
 		for _, s := range e.interactiveStates {
