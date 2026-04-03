@@ -42,6 +42,7 @@ type Platform struct {
 	token                      string
 	allowFrom                  string
 	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
+	allowedChannels            map[string]struct{} // if non-empty, only respond in these channel IDs
 	groupReplyAll              bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -69,10 +70,21 @@ func New(opts map[string]any) (core.Platform, error) {
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
+
+	allowedChannels := make(map[string]struct{})
+	if ch, ok := opts["channels"].(string); ok && ch != "" {
+		for _, id := range strings.Split(ch, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				allowedChannels[id] = struct{}{}
+			}
+		}
+	}
+
 	return &Platform{
 		token:                      token,
 		allowFrom:                  allowFrom,
 		guildID:                    guildID,
+		allowedChannels:            allowedChannels,
 		groupReplyAll:              groupReplyAll,
 		shareSessionInChannel:      shareSessionInChannel,
 		readyCh:                    make(chan struct{}),
@@ -435,6 +447,12 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			slog.Debug("discord: message from unauthorized user", "user", m.Author.ID)
 			return
 		}
+		if len(p.allowedChannels) > 0 {
+			if _, ok := p.allowedChannels[m.ChannelID]; !ok {
+				slog.Debug("discord: message in non-allowed channel", "channel", m.ChannelID)
+				return
+			}
+		}
 
 		// In guild channels, only respond when the bot is @mentioned (unless group_reply_all).
 		// Check both user mentions and role mentions (Discord auto-creates a managed role
@@ -549,6 +567,12 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 			},
 		})
 		return
+	}
+	if len(p.allowedChannels) > 0 {
+		if _, ok := p.allowedChannels[i.ChannelID]; !ok {
+			slog.Debug("discord: interaction in non-allowed channel", "channel", i.ChannelID)
+			return
+		}
 	}
 
 	switch i.Type {
