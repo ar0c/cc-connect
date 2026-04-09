@@ -218,6 +218,8 @@ type Engine struct {
 	platformReady       map[Platform]bool
 	stopping            bool
 
+	seenMsgIDs sync.Map // msg_id → struct{}: engine-level dedup to prevent duplicate processing
+
 	// /web command callbacks
 	webSetupFunc  func() (port int, token string, needRestart bool, err error)
 	webStatusFunc func() (url string)
@@ -1353,6 +1355,16 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				"channel_id", channelID, "session", msg.SessionKey)
 			return
 		}
+	}
+
+	// Engine-level dedup: when multiple platform bots in the same server
+	// deliver the same message to this engine, only process the first copy.
+	if msg.MessageID != "" {
+		if _, loaded := e.seenMsgIDs.LoadOrStore(msg.MessageID, struct{}{}); loaded {
+			slog.Debug("ignoring duplicate message", "msg_id", msg.MessageID, "session", msg.SessionKey)
+			return
+		}
+		time.AfterFunc(2*time.Minute, func() { e.seenMsgIDs.Delete(msg.MessageID) })
 	}
 
 	slog.Info("message received",
