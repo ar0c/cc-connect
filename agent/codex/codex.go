@@ -22,10 +22,10 @@ func init() {
 
 // Agent drives OpenAI Codex CLI using `codex exec --json`.
 //
-// Modes (maps to codex exec flags):
-//   - "suggest":   default, no special flags (safe commands only)
-//   - "auto-edit": --full-auto (sandbox-protected auto execution)
-//   - "full-auto": --full-auto (sandbox-protected auto execution)
+// Modes for cc-connect's non-interactive `codex exec --json` integration:
+//   - "suggest":   read-only sandbox, approval_policy=never
+//   - "auto-edit": workspace-write sandbox, approval_policy=never
+//   - "full-auto": workspace-write sandbox, approval_policy=never
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
 	workDir         string
@@ -454,9 +454,9 @@ func (a *Agent) providerEnvLocked() []string {
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
-		{Key: "suggest", Name: "Suggest", NameZh: "建议", Desc: "Ask permission for every tool call", DescZh: "每次工具调用都需确认"},
-		{Key: "auto-edit", Name: "Auto Edit", NameZh: "自动编辑", Desc: "Auto-approve file edits, ask for shell commands", DescZh: "自动允许文件编辑，Shell 命令需确认"},
-		{Key: "full-auto", Name: "Full Auto", NameZh: "全自动", Desc: "Auto-approve with workspace sandbox", DescZh: "自动通过（工作区沙箱）"},
+		{Key: "suggest", Name: "Suggest", NameZh: "建议", Desc: "Read-only sandbox (non-interactive exec)", DescZh: "只读沙箱（非交互 exec）"},
+		{Key: "auto-edit", Name: "Auto Edit", NameZh: "自动编辑", Desc: "Workspace-write sandbox (legacy alias in exec mode)", DescZh: "工作区可写沙箱（exec 模式下的兼容别名）"},
+		{Key: "full-auto", Name: "Full Auto", NameZh: "全自动", Desc: "Workspace-write sandbox without approval prompts", DescZh: "工作区可写沙箱，无交互审批"},
 		{Key: "yolo", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Bypass all approvals and sandbox", DescZh: "跳过所有审批和沙箱"},
 	}
 }

@@ -1017,10 +1017,14 @@ app_secret = "your-feishu-app-secret"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #
 # Mode options / 模式说明:
-# - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）
-# - "auto-edit": auto-approve file edits, ask for shell commands / 文件编辑自动通过，Shell 命令仍需确认
-# - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
+# - "suggest":   read-only sandbox, no interactive approvals in exec mode / 只读沙箱，exec 模式下无交互审批
+# - "auto-edit": workspace-write sandbox (legacy alias in exec mode) / 工作区可写沙箱（exec 模式下的兼容别名）
+# - "full-auto": workspace-write sandbox without approval prompts / 工作区可写沙箱，无交互审批
 # - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
+# Note: On some Linux/container hosts, Codex sandboxing may fail with bubblewrap/userns errors.
+# In that case, switch to "yolo" if the environment is already externally sandboxed.
+# 注意：某些 Linux/容器环境下，Codex 沙箱可能因 bubblewrap/userns 失败。
+# 如果外层环境已经有隔离，可改用 "yolo"。
 #
 # Optional: specify a model / 可选：指定模型
 # model = "o3"

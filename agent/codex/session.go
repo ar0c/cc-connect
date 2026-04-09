@@ -158,12 +158,7 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		args = []string{"exec", "--skip-git-repo-check"}
 	}
 
-	switch cs.mode {
-	case "auto-edit", "full-auto":
-		args = append(args, "--full-auto")
-	case "yolo":
-		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-	}
+	args = append(args, codexModeArgs(cs.mode)...)
 
 	if cs.model != "" {
 		args = append(args, "--model", cs.model)
@@ -187,6 +182,20 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		args = append(args, "--json", "--cd", cs.workDir, "-")
 	}
 	return args
+}
+
+// codexModeArgs returns explicit CLI overrides for cc-connect's non-interactive
+// Codex integration. `codex exec` cannot complete interactive approval flows, so
+// we always force approval_policy=never and vary only the sandbox level.
+func codexModeArgs(mode string) []string {
+	switch mode {
+	case "auto-edit", "full-auto":
+		return []string{"-c", `approval_policy="never"`, "-c", `sandbox_mode="workspace-write"`}
+	case "yolo":
+		return []string{"--dangerously-bypass-approvals-and-sandbox"}
+	default:
+		return []string{"-c", `approval_policy="never"`, "-c", `sandbox_mode="read-only"`}
+	}
 }
 
 func codexImageExt(mime string) string {

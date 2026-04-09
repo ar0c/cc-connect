@@ -47,7 +47,10 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	want := []string{
 		"exec",
 		"--skip-git-repo-check",
-		"--full-auto",
+		"-c",
+		`approval_policy="never"`,
+		"-c",
+		`sandbox_mode="workspace-write"`,
 		"--model",
 		"o3",
 		"-c",
@@ -64,6 +67,44 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 		if args[i] != want[i] {
 			t.Fatalf("args[%d] = %q, want %q, args=%v", i, args[i], want[i], args)
 		}
+	}
+}
+
+func TestBuildExecArgs_SuggestUsesReadOnlyNeverApproval(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "/tmp/project", "", "", "suggest", "", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	if !containsSequence(args, []string{"-c", `approval_policy="never"`}) {
+		t.Fatalf("args missing approval_policy=never: %v", args)
+	}
+	if !containsSequence(args, []string{"-c", `sandbox_mode="read-only"`}) {
+		t.Fatalf("args missing read-only sandbox: %v", args)
+	}
+	if containsSequence(args, []string{"--dangerously-bypass-approvals-and-sandbox"}) {
+		t.Fatalf("suggest args should not bypass sandbox: %v", args)
+	}
+}
+
+func TestBuildExecArgs_YoloBypassesSandbox(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "/tmp/project", "", "", "yolo", "", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	if !containsSequence(args, []string{"--dangerously-bypass-approvals-and-sandbox"}) {
+		t.Fatalf("args missing dangerous bypass flag: %v", args)
+	}
+	if containsSequence(args, []string{"-c", `sandbox_mode="read-only"`}) || containsSequence(args, []string{"-c", `sandbox_mode="workspace-write"`}) {
+		t.Fatalf("yolo args should not carry sandbox flags: %v", args)
+	}
+	if containsSequence(args, []string{"-c", `approval_policy="never"`}) {
+		t.Fatalf("yolo args should not carry approval overrides: %v", args)
 	}
 }
 

@@ -557,8 +557,21 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		p.handleInteraction(s, i)
 	})
 
-	if err := session.Open(); err != nil {
-		return fmt.Errorf("discord: open gateway: %w", err)
+	var openErr error
+	for attempt := 1; attempt <= 15; attempt++ {
+		openErr = session.Open()
+		if openErr == nil {
+			break
+		}
+		slog.Warn("discord: open gateway failed, retrying", "attempt", attempt, "error", openErr)
+		backoff := time.Duration(attempt*3) * time.Second
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+		time.Sleep(backoff)
+	}
+	if openErr != nil {
+		return fmt.Errorf("discord: open gateway: %w", openErr)
 	}
 
 	return nil
