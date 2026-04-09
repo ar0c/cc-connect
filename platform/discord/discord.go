@@ -40,11 +40,16 @@ type interactionReplyCtx struct {
 	firstDone   bool
 }
 
+type progressPlatform struct {
+	*Platform
+}
+
 type Platform struct {
 	token                      string
 	allowFrom                  string
 	guildID                    string              // optional: per-guild registration (instant) vs global (up to 1h propagation)
 	allowedChannels            map[string]struct{} // if non-empty, only respond in these channel IDs
+	progressStyle              string
 	groupReplyAll              bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -59,6 +64,7 @@ type Platform struct {
 	readyCh                    chan struct{}
 	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
 	seenInteractions           sync.Map // interaction ID dedup: prevents duplicate slash/button events
+	self                       core.Platform
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -73,6 +79,17 @@ func New(opts map[string]any) (core.Platform, error) {
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
+	progressStyle := "legacy"
+	if v, ok := opts["progress_style"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "legacy":
+			progressStyle = "legacy"
+		case "compact", "card":
+			progressStyle = strings.ToLower(strings.TrimSpace(v))
+		default:
+			return nil, fmt.Errorf("discord: invalid progress_style %q (want legacy, compact, or card)", v)
+		}
+	}
 
 	allowedChannels := make(map[string]struct{})
 	if ch, ok := opts["channels"].(string); ok && ch != "" {
@@ -96,21 +113,60 @@ func New(opts map[string]any) (core.Platform, error) {
 		proxyU = u
 	}
 
-	return &Platform{
+	base := &Platform{
 		token:                      token,
 		allowFrom:                  allowFrom,
 		guildID:                    guildID,
 		allowedChannels:            allowedChannels,
+		progressStyle:              progressStyle,
 		groupReplyAll:              groupReplyAll,
 		shareSessionInChannel:      shareSessionInChannel,
 		readyCh:                    make(chan struct{}),
 		threadIsolation:            threadIsolation,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		proxyURL:                   proxyU,
-	}, nil
+	}
+	if progressStyle == "compact" || progressStyle == "card" {
+		wrapped := &progressPlatform{Platform: base}
+		base.self = wrapped
+		return wrapped, nil
+	}
+	base.self = base
+	return base, nil
 }
 
 func (p *Platform) Name() string { return "discord" }
+
+func (p *Platform) selfPlatform() core.Platform {
+	if p != nil && p.self != nil {
+		return p.self
+	}
+	return p
+}
+
+func (p *Platform) dispatchMessage(msg *core.Message) {
+	if p == nil || p.handler == nil {
+		return
+	}
+	p.handler(p.selfPlatform(), msg)
+}
+
+func (p *progressPlatform) ProgressStyle() string {
+	switch strings.ToLower(strings.TrimSpace(p.progressStyle)) {
+	case "", "legacy":
+		return "legacy"
+	case "compact":
+		return "compact"
+	case "card":
+		return "card"
+	default:
+		return "legacy"
+	}
+}
+
+func (p *progressPlatform) SupportsProgressCardPayload() bool {
+	return p.ProgressStyle() == "card"
+}
 
 func (p *Platform) makeSessionKey(channelID string, userID string) string {
 	return buildSessionKey(channelID, userID, p.shareSessionInChannel)
@@ -550,7 +606,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			ChatName: p.resolveChannelName(m.ChannelID),
 			Content:  m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
 		}
-		p.handler(p, msg)
+		p.dispatchMessage(msg)
 	})
 
 	session.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -659,7 +715,7 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		ChatName: p.resolveChannelName(channelID),
 		Content:  cmdText, ReplyCtx: rctx,
 	}
-	p.handler(p, msg)
+	p.dispatchMessage(msg)
 }
 
 // replyContextForDeferredInteractionFallback builds a replyContext for slash commands
@@ -723,7 +779,7 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 	if i.Message != nil {
 		rc.messageID = i.Message.ID
 	}
-	p.handler(p, &core.Message{
+	p.dispatchMessage(&core.Message{
 		SessionKey: sessionKey,
 		Platform:   "discord",
 		MessageID:  i.ID,
@@ -988,6 +1044,8 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 var _ core.ImageSender = (*Platform)(nil)
 var _ core.FileSender = (*Platform)(nil)
 var _ core.InlineButtonSender = (*Platform)(nil)
+var _ core.ProgressStyleProvider = (*progressPlatform)(nil)
+var _ core.ProgressCardPayloadSupport = (*progressPlatform)(nil)
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	// discord:{channelID}:{userID} or discord:{threadID}
@@ -1031,10 +1089,8 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("discord: invalid reply context type %T", rctx)
 	}
 
-	if len(content) > maxDiscordLen {
-		content = content[:maxDiscordLen]
-	}
-	sent, err := p.session.ChannelMessageSend(channelID, content)
+	msg := buildDiscordPreviewMessage(content)
+	sent, err := p.session.ChannelMessageSendComplex(channelID, msg)
 	if err != nil {
 		return nil, fmt.Errorf("discord: send preview: %w", err)
 	}
@@ -1047,10 +1103,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !ok {
 		return fmt.Errorf("discord: invalid preview handle type %T", previewHandle)
 	}
-	if len(content) > maxDiscordLen {
-		content = content[:maxDiscordLen]
-	}
-	_, err := p.session.ChannelMessageEdit(h.channelID, h.messageID, content)
+	_, err := p.session.ChannelMessageEditComplex(buildDiscordPreviewEdit(h.channelID, h.messageID, content))
 	if err != nil {
 		return fmt.Errorf("discord: edit message: %w", err)
 	}
